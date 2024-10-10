@@ -1,0 +1,14 @@
+name: Pull Request validation
+
+on: [pull_request]
+
+
+jobs:
+  DigitalMarketPlace-contracts-ci:
+    name: Run DigitalMarketPlace-contracts validation
+    uses: ./.github/workflows/DigitalMarketPlace-contracts-ci.yaml
+
+  DigitalMarketPlace-frontend-ci:
+    name: Run DigitalMarketPlace-frontend validation
+    uses: ./.github/workflows/DigitalMarketPlace-frontend-ci.yaml
+

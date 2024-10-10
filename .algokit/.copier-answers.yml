@@ -1,0 +1,10 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: 2.0.11
+_src_path: gh:algorandfoundation/algokit-fullstack-template
+author_email: chrystopam@gmail.com
+author_name: krispamB
+cloud_provider: none
+contract_name: DigitalMarketPlace
+preset_name: production
+project_name: DigitalMarketPlace
+

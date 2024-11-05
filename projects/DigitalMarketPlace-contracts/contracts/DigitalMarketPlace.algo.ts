@@ -1,57 +1,152 @@
 import { Contract } from '@algorandfoundation/tealscript';
 
+type forSaleId = { owner: Address; asset: AssetID; nonce: uint64 };
+type forSaleInfo = { deposited: uint64; unitaryPrice: uint64 };
+
+/**
+ * key -> value === (Address, uInt64, uInt64) -> (uInt64, uInt64)
+ * (32 + 8 + 8) -> (8 + 8)
+ * 48 -> 16
+ * total = 64B
+ */
+
+// 0.0025 per box created(2_500 micro algos)
+// 0.0004 per byte in box(400 micro algos)
+
+// per box created: 25_600 micro algos
+
+const forSaleMbr: number = 2_500 + 400 * 64;
+
 export class DigitalMarketPlace extends Contract {
+  listings = BoxMap<forSaleId, forSaleInfo>();
+
   /**
-   * Calculates the sum of two numbers
+   * Opt the contract into the asset
    *
-   * @param a
-   * @param b
-   * @returns The sum of a and b
+   * @param mbrTxn The payment transaction that pays for the Minimum Balance Requirement
+   * @param asset The assetId of the asset that that want to be opted in
    */
-  private getSum(a: uint64, b: uint64): uint64 {
-    return a + b;
+  public allowAsset(mbrPay: PayTxn, asset: AssetID): void {
+    /* this ensures that the asset has not already been opted in by a user */
+    assert(!this.app.address.isOptedInToApp(asset));
+
+    verifyPayTxn(mbrPay, {
+      receiver: this.app.address,
+      amount: globals.assetCreateMinBalance,
+    });
+
+    /* this opts in to the contract */
+    sendAssetTransfer({
+      xferAsset: asset,
+      assetAmount: 0,
+      assetReceiver: this.app.address,
+    });
   }
 
   /**
-   * Calculates the difference between two numbers
+   *First deposit of asset into the contract
    *
-   * @param a
-   * @param b
-   * @returns The difference between a and b.
+   * @param mbrPay Transaction that pays for the box storage
+   * @param xfer Asset transfer txn
+   * @param nonce nonce of asset listed
+   * @param unitaryPrice unitary price of asset listed
    */
-  private getDifference(a: uint64, b: uint64): uint64 {
-    return a >= b ? a - b : b - a;
+  public firstDeposit(mbrPay: PayTxn, xfer: AssetTransferTxn, nonce: uint64, unitaryPrice: uint64) {
+    assert(!this.listings({ owner: this.txn.sender, asset: xfer.xferAsset, nonce }).exists);
+
+    verifyPayTxn(mbrPay, {
+      sender: this.txn.sender,
+      receiver: this.app.address,
+      amount: forSaleMbr,
+    });
+
+    verifyAssetTransferTxn(xfer, {
+      sender: this.txn.sender,
+      assetReceiver: this.app.address,
+      assetAmount: { greaterThan: 0 },
+    });
+
+    this.listings({ owner: this.txn.sender, asset: xfer.xferAsset, nonce }).value = {
+      deposited: xfer.assetAmount,
+      unitaryPrice,
+    };
   }
 
   /**
-   * A method that takes two numbers and does either addition or subtraction
+   *Deposit asset ito contract
    *
-   * @param a The first uint64
-   * @param b The second uint64
-   * @param operation The operation to perform. Can be either 'sum' or 'difference'
-   *
-   * @returns The result of the operation
+   * @param xfer Asset transfer txn
+   * @param nonce nonce of asset listed
    */
-  doMath(a: uint64, b: uint64, operation: string): uint64 {
-    let result: uint64;
+  public deposit(xfer: AssetTransferTxn, nonce: uint64): void {
+    assert(this.listings({ owner: this.txn.sender, asset: xfer.xferAsset, nonce }).exists);
 
-    if (operation === 'sum') {
-      result = this.getSum(a, b);
-    } else if (operation === 'difference') {
-      result = this.getDifference(a, b);
-    } else throw Error('Invalid operation');
+    verifyAssetTransferTxn(xfer, {
+      sender: this.txn.sender,
+      assetReceiver: this.app.address,
+      assetAmount: { greaterThan: 0 },
+    });
 
-    return result;
+    const currentListing = this.listings({ owner: this.txn.sender, asset: xfer.xferAsset, nonce }).value;
+
+    this.listings({ owner: this.txn.sender, asset: xfer.xferAsset, nonce }).value = {
+      deposited: currentListing.deposited + xfer.assetAmount,
+      unitaryPrice: currentListing.unitaryPrice,
+    };
   }
 
   /**
-   * A demonstration method used in the AlgoKit fullstack template.
-   * Greets the user by name.
+   *Set/Update unitary price
    *
-   * @param name The name of the user to greet.
-   * @returns A greeting message to the user.
+   * @param asset
+   * @param nonce
+   * @param unitaryPrice
    */
-  hello(name: string): string {
-    return 'Hello, ' + name;
+  public setUnitaryPrice(asset: AssetID, nonce: uint64, unitaryPrice: uint64): void {
+    const currentDeposit = this.listings({ owner: this.txn.sender, asset, nonce }).value.deposited;
+
+    this.listings({ owner: this.txn.sender, asset, nonce }).value = {
+      deposited: currentDeposit,
+      unitaryPrice,
+    };
+  }
+
+  public buy(owner: Address, asset: AssetID, nonce: uint64, buyPay: PayTxn, quantity: uint64): void {
+    const currentListing = this.listings({ owner, asset, nonce }).value;
+
+    const amountToBePaid = wideRatio([currentListing.unitaryPrice, quantity], [10 ** asset.decimals]);
+
+    verifyPayTxn(buyPay, {
+      sender: this.txn.sender,
+      receiver: this.app.address,
+      amount: amountToBePaid,
+    });
+
+    sendAssetTransfer({
+      xferAsset: asset,
+      assetReceiver: this.txn.sender,
+      assetAmount: quantity,
+    });
+
+    this.listings({ owner, asset, nonce }).value = {
+      deposited: currentListing.deposited - quantity,
+      unitaryPrice: currentListing.unitaryPrice,
+    };
+  }
+
+  /**
+   *Withdraw unsold assets/collect mbr used to create box
+   *
+   * @param asset
+   * @param nonce
+   */
+  public withdraw(asset: AssetID, nonce: uint64) {
+    const currentListing = this.listings({ owner: this.txn.sender, asset, nonce }).value;
+
+    this.listings({ owner: this.txn.sender, asset, nonce }).delete();
+
+    sendPayment({ receiver: this.txn.sender, amount: forSaleMbr });
+
+    sendAssetTransfer({ xferAsset: asset, assetReceiver: this.txn.sender, assetAmount: currentListing.deposited });
   }
 }
